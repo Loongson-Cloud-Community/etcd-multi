@@ -1,0 +1,82 @@
+name: ETCD daily update build (latest 70 tags)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 6"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.set-tags.outputs.tags }}
+    steps:
+      - name: Get latest patch versions of etcd
+        id: set-tags
+        run: |
+          TAGS=$(curl -s "https://api.github.com/repos/etcd-io/etcd/tags?per_page=100&page=1" \
+           | jq -r '.[].name' \
+           | head -n 70 \
+           | jq -R . \
+           | jq -cs .)
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+  build-binaries:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tag: ${{ fromJson(needs.prepare.outputs.tags) }}
+    env:
+      ETCD_VERSION: ${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Check Release
+        id: create-binaries
+        run: |
+          gh release view ${{ matrix.tag }} -R ${{ github.repository }} || \
+          gh release create ${{ matrix.tag }} -R ${{ github.repository }} -t "${{ matrix.tag }}" -n "Automated release for version ${{ matrix.tag }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker Binaries
+        run: |
+          docker buildx build --platform linux/loong64 \
+            -t etcd-static-loong64:${{ matrix.tag }} \
+            --build-arg ETCD_VERSION=${{ matrix.tag }} \
+            --build-arg https_proxy=${https_proxy} \
+            -f binaries/Dockerfile . --load
+
+      - name: Extract Binary Artifacts
+        run: |
+          mkdir -p dist
+          docker run --rm -v ${{ github.workspace }}/dist:/out \
+            etcd-static-loong64:${{ matrix.tag }} \
+            bash -c 'cp /opt/etcd/dist/* /out/ || true'
+
+      - name: Package tarball with binaries only
+        run: |
+          VERSION=${{ matrix.tag }}
+          ARCH=loong64
+          PKG_NAME="etcd-${VERSION}-linux-${ARCH}"
+          mkdir -p "$PKG_NAME"
+          # 只复制二进制文件进去，dist里假设都是二进制
+          cp dist/* "$PKG_NAME"/
+          tar czf "${PKG_NAME}.tar.gz" "$PKG_NAME"
+          # 清理旧的 dist，放新包进去
+          rm -rf dist/*
+          mv "${PKG_NAME}.tar.gz" dist/
+
+      - name: Upload Binary Artifacts
+        run: |
+          ls -al dist
+          gh release upload ${{ matrix.tag }} -R ${{ github.repository }} dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
