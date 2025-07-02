@@ -1,0 +1,71 @@
+name: "build docker"
+
+on:
+  schedule:
+    - cron: '0 2 * * 6'
+  workflow_dispatch:  # 手动触发按钮
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.set-tags.outputs.tags }}
+    steps:
+      - name: Get latest patch versions of etcd
+        id: set-tags
+        run: |
+          TAGS=$(curl -s "https://api.github.com/repos/etcd-io/etcd/tags?per_page=100&page=1" \
+           | jq -r '.[].name' \
+           | head -n 70 \
+           | jq -R . \
+           | jq -cs .)
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+  build-docker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tag: ${{ fromJson(needs.prepare.outputs.tags) }}
+    env:
+      ETCD_VERSION: ${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build etcd docker image
+        run: |
+          VERSION="$ETCD_VERSION"
+          VERSION_NO_V="${VERSION#v}"
+          echo "VERSION_NO_V=${VERSION_NO_V}" >> "$GITHUB_ENV"
+          mkdir ${VERSION_NO_V}
+          cp docker/Dockerfile ${VERSION_NO_V}
+          wget https://github.com/Loongson-Cloud-Community/etcd-multi/releases/download/${{ matrix.tag }}/etcd-${{ matrix.tag }}-linux-loong64.tar.gz
+          mkdir dist
+          tar -xzf etcd-${{ matrix.tag }}-linux-loong64.tar.gz -C dist --strip-components=1
+          docker buildx build --platform linux/loong64 \
+            -t lcr.loongnix.cn/kubernetes/etcd:${VERSION_NO_V} \
+            --build-arg https_proxy=${https_proxy} \
+            --build-arg http_proxy=${http_proxy} \
+            -f ${VERSION_NO_V}/Dockerfile . --load
+          bash docker/push.sh ${VERSION_NO_V}
+          rm -rf dist
+
+      - name: Commit new Dockerfile directory
+        run: |
+          # 配置 Git 用户信息，这是提交代码的必要步骤
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 添加新创建的目录到暂存区
+          git add ${VERSION_NO_V}
+          
+          # 检查是否有文件需要提交，避免空提交
+          git diff-index --quiet HEAD || git commit -m "add etcd image ${VERSION_NO_V}"
+          
+          # 推送更改到远程仓库
+          git push
