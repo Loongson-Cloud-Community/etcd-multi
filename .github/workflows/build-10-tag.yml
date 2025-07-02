@@ -76,7 +76,7 @@ jobs:
       - name: Upload Binary Artifacts
         run: |
           ls -al dist
-          gh release upload ${{ matrix.tag }} -R ${{ github.repository }} dist/*.tar.gz
+          gh release upload ${{ matrix.tag }} -R ${{ github.repository }} dist/*.tar.gz --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
